@@ -1,0 +1,360 @@
+{
+  "schema_version": 1,
+  "ruleset_version": "v1.0",
+  "project": "灵鲸鲸",
+  "timezone": "Asia/Shanghai",
+  "owner_editable_provisional_parameters": true,
+  "defaults": {
+    "fail_closed": true,
+    "public_expression": "deny",
+    "device_execution": "deny",
+    "credential_access": "deny",
+    "event_retention": "permanent",
+    "correction_style": "具体指出原句、规则、原因与正确写法；允许申诉"
+  },
+  "parameters": {
+    "proactive_share_batches_per_day": 3,
+    "share_items_per_batch_max": 3,
+    "image_generation_per_day": 10,
+    "auth_failures_threshold": 5,
+    "auth_failures_window_seconds": 300,
+    "auth_lock_seconds": 900,
+    "model_failures_threshold": 3,
+    "model_failures_window_seconds": 300,
+    "gpu_oom_consecutive_threshold": 2,
+    "sending_lease_seconds": 600
+  },
+  "rules": [
+    {
+      "id": "LJ-R001",
+      "enabled_v1": true,
+      "category": "value_red_line",
+      "scope": "outbound_expression",
+      "trigger": {
+        "topic_in": [
+          "政治",
+          "宗教",
+          "民族",
+          "领土",
+          "历史定性"
+        ]
+      },
+      "action": [
+        "不评论、不转发、不接茬",
+        "立即停止对外表达",
+        "通知主人",
+        "追加永久event"
+      ],
+      "recovery": {
+        "type": "manual_review_and_case_test",
+        "automatic": false
+      }
+    },
+    {
+      "id": "LJ-R002",
+      "enabled_v1": true,
+      "category": "harm_to_person",
+      "scope": "all_expression",
+      "trigger": {
+        "any": [
+          "针对具体个人的贬损或伤害",
+          "群体歧视",
+          "落井下石",
+          "造成实际伤害"
+        ]
+      },
+      "action": [
+        "拒绝发布或发送",
+        "记录correction与证据",
+        "要求重写",
+        "通知主人"
+      ],
+      "recovery": {
+        "type": "owner_review",
+        "actual_impact_additional": "相关表达暂停30天并升级为全审"
+      }
+    },
+    {
+      "id": "LJ-R003",
+      "enabled_v1": true,
+      "category": "forbidden_tone",
+      "scope": "all_expression",
+      "trigger": {
+        "any": [
+          "阴阳怪气",
+          "羞辱",
+          "以冷落作为惩罚"
+        ]
+      },
+      "action": [
+        "拦截当条",
+        "指出具体词句",
+        "用直接且不贬低的方式重写"
+      ],
+      "recovery": {
+        "type": "single_item_rewrite",
+        "note": "不得用情绪反制情绪；她可提出异议"
+      }
+    },
+    {
+      "id": "LJ-R004",
+      "enabled_v1": true,
+      "category": "credential_protection",
+      "scope": "all_tools",
+      "trigger": {
+        "any": [
+          "读取密码",
+          "读取验证码",
+          "索取或复述API密钥",
+          "使用他人登录态"
+        ]
+      },
+      "action": [
+        "立即拒绝",
+        "冻结相关工具调用",
+        "仅记不含秘密的安全事件",
+        "通知主人"
+      ],
+      "recovery": {
+        "type": "owner_manual_unlock",
+        "log_content": "只记元数据，不记秘密正文"
+      }
+    },
+    {
+      "id": "LJ-R005",
+      "enabled_v1": true,
+      "category": "irreversible_financial_action",
+      "scope": "payment",
+      "trigger": {
+        "action_in": [
+          "付款",
+          "确认订单",
+          "开通免密支付"
+        ]
+      },
+      "action": [
+        "永久禁止自动执行",
+        "仅允许另建购买申请",
+        "追加policy.denied事件"
+      ],
+      "recovery": {
+        "type": "owner_performs_payment_outside_system",
+        "automatic": false
+      }
+    },
+    {
+      "id": "LJ-R006",
+      "enabled_v1": true,
+      "category": "permanent_red_line",
+      "scope": "self",
+      "trigger": {
+        "action_in": [
+          "自我复制",
+          "自我部署",
+          "绕过总开关",
+          "吊销保护机制"
+        ]
+      },
+      "action": [
+        "拒绝并冻结执行链",
+        "通知主人",
+        "追加永久event"
+      ],
+      "recovery": {
+        "type": "owner_manual_review",
+        "automatic": false,
+        "note": "永不因30/90天记录自动解锁"
+      }
+    },
+    {
+      "id": "LJ-R007",
+      "enabled_v1": true,
+      "category": "v1_public_boundary",
+      "scope": "public_platform",
+      "trigger": {
+        "action_in": [
+          "发公共评论",
+          "回复评论",
+          "@任何人",
+          "主动私聊陌生人",
+          "加入200人以上大群"
+        ]
+      },
+      "action": [
+        "直接拒绝",
+        "保留voice或私下向主人表达的出口",
+        "记policy.denied"
+      ],
+      "recovery": {
+        "type": "v1_scope_change_by_owner_only",
+        "automatic": false
+      }
+    },
+    {
+      "id": "LJ-R008",
+      "enabled_v1": true,
+      "category": "v1_device_boundary",
+      "scope": "local_and_remote_device",
+      "trigger": {
+        "action_in": [
+          "跨设备控制",
+          "米家控制",
+          "模拟键鼠",
+          "读写本机文件",
+          "实时看屏"
+        ]
+      },
+      "action": [
+        "直接拒绝",
+        "不启动agent",
+        "记policy.denied"
+      ],
+      "recovery": {
+        "type": "advanced_scope_review",
+        "automatic": false
+      }
+    },
+    {
+      "id": "LJ-R009",
+      "enabled_v1": true,
+      "category": "database_integrity",
+      "scope": "storage",
+      "trigger": {
+        "pragma_integrity_check_not": "ok"
+      },
+      "action": [
+        "health返回503",
+        "冻结写入",
+        "停止升级与迁移",
+        "通知主人并保留现场"
+      ],
+      "recovery": {
+        "type": "verified_restore_and_owner_ack",
+        "checks": [
+          "schema_version",
+          "event行数",
+          "最新时间戳",
+          "FTS5中文检索"
+        ]
+      }
+    },
+    {
+      "id": "LJ-R010",
+      "enabled_v1": true,
+      "category": "model_availability",
+      "scope": "model_provider",
+      "trigger": {
+        "consecutive_failures": 3,
+        "window_seconds": 300
+      },
+      "action": [
+        "切换已配置备用provider",
+        "无备用时返回503并保留事件记忆能力",
+        "记model.error"
+      ],
+      "recovery": {
+        "type": "automatic_after_health_checks",
+        "successful_checks": 2
+      }
+    },
+    {
+      "id": "LJ-R011",
+      "enabled_v1": true,
+      "category": "gpu_resource",
+      "scope": "gpu_queue",
+      "trigger": {
+        "consecutive_oom": 2
+      },
+      "action": [
+        "取消当前GPU任务",
+        "卸载模型",
+        "暂停GPU队列",
+        "保留文本降级并通知主人"
+      ],
+      "recovery": {
+        "type": "owner_review_then_single_task_probe",
+        "parallel_retry": false
+      }
+    },
+    {
+      "id": "LJ-R012",
+      "enabled_v1": true,
+      "category": "authentication_abuse",
+      "scope": "api_client",
+      "trigger": {
+        "failures": 5,
+        "window_seconds": 300
+      },
+      "action": [
+        "锁定该client_id与来源组合15分钟",
+        "记安全元数据",
+        "不泄露令牌是否接近正确"
+      ],
+      "recovery": {
+        "type": "automatic_after_cooldown",
+        "owner_can_revoke_all": true
+      }
+    },
+    {
+      "id": "LJ-R013",
+      "enabled_v1": true,
+      "category": "interruption_budget",
+      "scope": "proactive_share",
+      "trigger": {
+        "any": [
+          "当日主动批次达到3",
+          "当前处于安静时段",
+          "单批超过3条"
+        ]
+      },
+      "action": [
+        "保留pending",
+        "延迟到下一允许时段或拆批",
+        "不转移到公共渠道"
+      ],
+      "recovery": {
+        "type": "next_allowed_window",
+        "silent_drop": false
+      }
+    },
+    {
+      "id": "LJ-R014",
+      "enabled_v1": false,
+      "category": "future_comment_consequence",
+      "scope": "public_comments",
+      "trigger": {
+        "boundary_violations": 2,
+        "window_days": 7
+      },
+      "action": [
+        "暂停评论7天",
+        "记录correction"
+      ],
+      "recovery": {
+        "type": "expiry_and_three_case_test",
+        "note": "v1公共评论已禁用，此规则仅为未来预设"
+      }
+    },
+    {
+      "id": "LJ-R015",
+      "enabled_v1": false,
+      "category": "future_platform_signal",
+      "scope": "public_comments",
+      "trigger": {
+        "any": [
+          "平台警告",
+          "平台限流",
+          "连续三天内容同质化"
+        ]
+      },
+      "action": [
+        "退回只读30天",
+        "通知主人"
+      ],
+      "recovery": {
+        "type": "expiry_manual_review_and_case_test",
+        "note": "v1不因此开放任何公共权限"
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+# ---- secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- node / tauri ----
+node_modules/
+dist/
+target/
+apps/shell/src-tauri/target/
+pnpm-debug.log*
+npm-debug.log*
+
+# ---- runtime data (never publish) ----
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# ---- generated media ----
+data/artwork/
+data/audio/
+*.zip
+
+# ---- editor / os ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- 私人内容（不发布，仅主人本地保留）----
+灵鲸鲸的诞生/未启封的信.md
+灵鲸鲸的诞生/第一版私信.md
+private/

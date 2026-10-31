@@ -1,0 +1,17 @@
+[package]
+name = "lingjingjing-shell"
+version = "0.1.0"
+description = "灵鲸鲸桌面壳"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon：托盘常驻菜单；image-png：托盘使用 PNG 图标资源。
+tauri = { version = "2", features = ["transparent", "tray-icon", "image-png"] }
+
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"
