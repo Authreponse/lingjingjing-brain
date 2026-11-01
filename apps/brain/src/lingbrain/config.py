@@ -15,6 +15,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 7100
     auth_token: str = "lingjingjing-local-dev"
+
     # 模型接口一律"留空即降级"：不配置 provider 时用 echo 占位，绝不硬依赖外部模型。
     # 以后接 Ollama / 任意 OpenAI 兼容 API，只改 .env，不动代码。
     model_provider: str = "echo"
@@ -23,6 +24,7 @@ class Settings:
     model_api_key: str = ""
     model_timeout_seconds: float = 60.0
     heartbeat_seconds: float = 15.0
+
     # 其余需要模型的能力也留空：能力探测到未配置即返回明确"未配置"，不偷偷 mock。
     image_backend: str = ""
     comfyui_url: str = ""
@@ -32,6 +34,7 @@ class Settings:
     speech_tts_backend: str = ""
     video_source: str = ""
     proactive_enabled: bool = True
+
     # M1 状态机（task-4）：静默时段按"本地时间"判断，用固定 UTC 偏移，
     # 不依赖 tzdata（Windows 上通常没装）。
     quiet_hours: str = "23:30-07:30"
