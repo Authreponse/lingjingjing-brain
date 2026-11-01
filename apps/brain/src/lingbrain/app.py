@@ -9,15 +9,23 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .config import Settings
-from .db import Database, utc_now
+from .db import SCHEMA_VERSION, Database, utc_now
 from .emotions import build_emotions_router
 from .imagegen import build_service as build_image_service
 from .models import EchoModel, ModelUnavailable, OpenAICompatibleModel
 from .api_image import register_image_routes
+from .deployment import create_deployment_router
 from .proactive import build_proactive_service
 from .proactive_routes import create_proactive_router
+from .provider_routes import create_provider_router
+from .providers import (
+    ProviderRegistry,
+    ProviderRouter,
+    remove_runtime,
+    write_runtime,
+)
 from .schemas import ChatRequest, ChatResponse, HealthResponse
-from .service import build_memory_extract_router
+from .service import build_memory_extract_router, list_chat_history
 from .screen import build_screen_service
 from .screen_routes import register_screen_routes
 from .service import BrainService
@@ -45,8 +53,13 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
         else:
             raise ValueError(f"未知模型驱动：{settings.model_provider}")
     machine = build_state_machine(db, settings)
+    # V4：提供商注册表 + 路由。未配置路由时 chat 退回启动时注入的 model。
+    registry = ProviderRegistry(db)
+    provider_router = ProviderRouter(registry, default=model)
     # chat 返回的状态与 GET /v1/state 走同一个投影，避免两套数值打架。
-    service = BrainService(db, model, state_source=machine.current_state)
+    service = BrainService(
+        db, model, state_source=machine.current_state, router=provider_router
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -56,6 +69,11 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
                 # M1：心跳改成推进状态机（能量/饱腹/疲劳随时间衰减、睡眠恢复）。
                 machine.heartbeat(actor="system")
 
+        # V4 契约第 4 节：启动就把实际端口与令牌写进 data/runtime.json，
+        # launcher 靠它 + /v1/health 判断后端是否就绪；退出时删除。
+        write_runtime(
+            settings.data_dir, port=settings.port, token=settings.auth_token
+        )
         task = asyncio.create_task(beat())
         try:
             yield
@@ -65,11 +83,15 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
                 await task
             except asyncio.CancelledError:
                 pass
+            remove_runtime(settings.data_dir)
             db.close()
 
     app = FastAPI(title="灵鲸鲸大脑", version=__version__, lifespan=lifespan)
     app.state.db = db
     app.state.service = service
+    app.state.machine = machine
+    app.state.registry = registry
+    app.state.provider_router = provider_router
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -82,7 +104,7 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
             "https://tauri.localhost",
             "tauri://localhost",
         ],
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type", "X-Ling-Token"],
     )
 
@@ -121,7 +143,7 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
             raise HTTPException(status_code=503, detail="数据库完整性检查失败")
         return HealthResponse(
             version=__version__,
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             model_provider=model.name,
             time=utc_now(),
         )
@@ -138,6 +160,14 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
         except ModelUnavailable as exc:
             db.append_event("system", "model.error", {"message": str(exc)})
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/v1/chat/history", dependencies=[Depends(authorized)])
+    async def chat_history(
+        limit: int = Query(default=200, ge=1, le=500),
+        before: str | None = Query(default=None, max_length=64),
+    ) -> dict:
+        """V4 契约第 1 节：按时间正序返回聊天消息，用于前端重建会话。"""
+        return list_chat_history(db, limit=limit, before=before)
 
     @app.get("/v1/events", dependencies=[Depends(authorized)])
     async def events(limit: int = Query(default=50, ge=1, le=200)) -> dict:
@@ -206,5 +236,13 @@ def create_app(settings: Settings | None = None, model=None) -> FastAPI:
 
     # ---- M5：静态看屏（默认关闭，暂停键持久，黑名单截前拦截） ----
     register_screen_routes(app, build_screen_service(db, settings), authorized)
+
+    # ---- V4：提供商注册表与路由配置（api_key 只写不读） ----
+    app.include_router(create_provider_router(registry, authorize=authorized))
+
+    # ---- 部署模式持久化（前端写不了 data/，这里是唯一写入方） ----
+    app.include_router(
+        create_deployment_router(settings.data_dir, authorize=authorized)
+    )
 
     return app

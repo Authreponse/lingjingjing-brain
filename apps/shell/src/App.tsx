@@ -1,565 +1,453 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { isTauri } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import {
-  checkHealth,
-  fetchArtworkBlobUrl,
-  fetchEmotions,
-  fetchState,
-  generateImage,
-  hasUsableState,
-  listArtwork,
-  mergeState,
-  normalizeState,
-  postInteraction,
-  renderEmotion,
-  sendChat,
-  setClickThrough,
-  toFriendlyError,
-} from './api'
-import { BubbleLayer } from './components/StateBubble'
-import { ChatPanel } from './components/ChatPanel'
-import { GalleryPanel } from './components/GalleryPanel'
-import { MoodPanel } from './components/MoodPanel'
-import { SettingsDialog } from './components/SettingsDialog'
-import { StatePanel } from './components/StatePanel'
-import { Whale } from './components/Whale'
-import { describeState, statusTone } from './status'
-import { useTrayMenu } from './useTrayMenu'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  ArtworkItem,
-  BubbleMessage,
-  ChatMessage,
-  ConnectionStatus,
-  EmotionItem,
-  EmotionRecommendation,
-  FriendlyError,
-  InteractionKind,
-  LingState,
-  RenderResult,
-  ViewId,
+  AppError, ArtworkItem, ChatRound, ConnectionStatus, HistoryMessage,
+  InteractionKind, LingState, Toast, ViewId,
 } from './types'
+import {
+  checkHealth, fetchArtworkBlob, fetchDeployment, fetchHistory, fetchState, hasUsableState,
+  listArtwork, normalizeState, postInteraction, putDeployment, sendChat, toAppError,
+} from './lib/api'
+import { groupRounds } from './lib/chat'
+import {
+  isOnboarded, loadDeployment, loadWhaleName, markOnboarded,
+  resolveConnection, saveConnection, saveDeployment, saveWhaleName,
+  type Deployment,
+  type DeploymentSync,
+} from './lib/storage'
+import { Splash } from './components/Splash'
+import { Onboarding } from './components/Onboarding'
+import { WhaleAvatar } from './components/WhaleAvatar'
+import { StatusRail } from './components/StatusRail'
+import {
+  IconChat, IconGallery, IconSettings, IconState, IconToolbox,
+} from './icons'
+import { ChatPage } from './pages/ChatPage'
+import { GalleryPage } from './pages/GalleryPage'
+import { StatePage } from './pages/StatePage'
+import { ToolsPage } from './pages/ToolsPage'
+import { SettingsPage } from './pages/SettingsPage'
 
-const TOKEN_KEY = 'lingjingjing.shell.token'
 const CLIENT_KEY = 'lingjingjing.shell.client-id'
 const MUTED_KEY = 'lingjingjing.shell.muted'
-const REFRESH_MS = 15_000
-const BUBBLE_MS = 3_600
+const REFRESH_MS = 20000
+const HISTORY_LIMIT = 200
 
-const timeFmt = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-const now = () => timeFmt.format(new Date())
-const newId = () =>
-  globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2)
-
-function readStore(key: string, fallback: string): string {
-  try {
-    return window.localStorage.getItem(key) || fallback
-  } catch {
-    return fallback
-  }
-}
-function writeStore(key: string, value: string) {
-  try {
-    window.localStorage.setItem(key, value)
-  } catch {
-    // 隐私模式下不可写，忽略。
-  }
-}
-
-const NAV: { id: ViewId; icon: string; label: string }[] = [
-  { id: 'chat', icon: '💬', label: '聊天' },
-  { id: 'mood', icon: '😊', label: '心情' },
-  { id: 'gallery', icon: '🖼', label: '画廊' },
-  { id: 'state', icon: '🐳', label: '状态' },
+const NAV: { id: ViewId; label: string; icon: typeof IconChat }[] = [
+  { id: 'chat', label: '聊天', icon: IconChat },
+  { id: 'interact', label: '互动', icon: IconState },
+  { id: 'gallery', label: '历史画作', icon: IconGallery },
+  { id: 'tools', label: '小鲸鱼的工具', icon: IconToolbox },
+  { id: 'settings', label: '设置', icon: IconSettings },
 ]
 
-export default function App() {
-  const desktop = isTauri()
-  const [token, setToken] = useState(() => readStore(TOKEN_KEY, 'lingjingjing-local-dev'))
-  const [clientId] = useState(() => {
-    const existing = readStore(CLIENT_KEY, '')
+function newId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
+function readClientId(): string {
+  try {
+    const existing = window.localStorage.getItem(CLIENT_KEY)
     if (existing) return existing
     const created = newId()
-    writeStore(CLIENT_KEY, created)
+    window.localStorage.setItem(CLIENT_KEY, created)
     return created
-  })
-  const [muted, setMuted] = useState(() => readStore(MUTED_KEY, '0') === '1')
+  } catch {
+    return newId()
+  }
+}
 
-  // 仅用于开发期截图/调试：?view=mood 可直接打开某个面板。生产行为不受影响。
-  const [view, setView] = useState<ViewId>(() => {
-    try {
-      const requested = new URLSearchParams(window.location.search).get('view')
-      if (requested === 'mood' || requested === 'gallery' || requested === 'state' || requested === 'chat') {
-        return requested
-      }
-    } catch {
-      // 忽略
-    }
-    return 'chat'
+export default function App() {
+  const [splashDone, setSplashDone] = useState(false)
+  // ?seen=1 仅用于无头浏览器截图验收（localStorage 每次全新，引导层会挡住主界面）；生产行为不受影响。
+  const [onboarded, setOnboarded] = useState(() => isOnboarded() || new URLSearchParams(window.location.search).get('seen') === '1')
+  const [deployment, setDeployment] = useState<Deployment | null>(() => loadDeployment())
+  // 部署配置与后端的同步状态：synced = 已写入 /v1/deployment；cached = 端点不可用，仅存本地（需在 UI 标注降级）
+  const [deploymentSync, setDeploymentSync] = useState<DeploymentSync>('unknown')
+  const [cfg, setCfg] = useState(() => resolveConnection())
+  const [whaleName, setWhaleName] = useState(() => loadWhaleName())
+  const [muted, setMuted] = useState(() => {
+    try { return window.localStorage.getItem(MUTED_KEY) === '1' } catch { return false }
   })
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [pinned, setPinned] = useState(true)
-  const [notice, setNotice] = useState('')
+  const [clientId] = useState(readClientId)
+  const [view, setView] = useState<ViewId>(() => {
+    const v = new URLSearchParams(window.location.search).get('view')
+    const allowed: ViewId[] = ['chat', 'interact', 'gallery', 'tools', 'settings']
+    return v && (allowed as string[]).includes(v) ? (v as ViewId) : 'chat'
+  })
 
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+  const [connError, setConnError] = useState<AppError | null>(null)
   const [state, setState] = useState<LingState>({})
-  const [lastKnown, setLastKnown] = useState<LingState | null>(null)
-  const [refreshing, setRefreshing] = useState(false)
-  const [connError, setConnError] = useState<FriendlyError | null>(null)
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: 'hello', role: 'system', content: '我在这儿。想聊什么都可以。', time: now() },
-  ])
-  const [input, setInput] = useState('')
+  const [messages, setMessages] = useState<HistoryMessage[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyError, setHistoryError] = useState<AppError | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
-
-  const [emotions, setEmotions] = useState<EmotionItem[]>([])
-  const [recommended, setRecommended] = useState<EmotionRecommendation>({})
-  const [emotionsLoading, setEmotionsLoading] = useState(false)
-  const [rendering, setRendering] = useState<string | null>(null)
-  const [renderResult, setRenderResult] = useState<RenderResult | null>(null)
-  const [renderUrl, setRenderUrl] = useState<string | null>(null)
-  const [moodError, setMoodError] = useState<FriendlyError | null>(null)
+  const [liveRounds, setLiveRounds] = useState<ChatRound[]>([])
 
   const [artworks, setArtworks] = useState<ArtworkItem[]>([])
   const [artUrls, setArtUrls] = useState<Record<string, string>>({})
   const [galleryLoading, setGalleryLoading] = useState(false)
-  const [generating, setGenerating] = useState(false)
-  const [galleryError, setGalleryError] = useState<FriendlyError | null>(null)
-
-  const [interacting, setInteracting] = useState<InteractionKind | null>(null)
-  const [bubbles, setBubbles] = useState<BubbleMessage[]>([])
+  const [galleryError, setGalleryError] = useState<AppError | null>(null)
   const objectUrls = useRef<string[]>([])
 
-  const hasState = lastKnown !== null || hasUsableState(state)
+  const [interacting, setInteracting] = useState<InteractionKind | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [toasts, setToasts] = useState<Toast[]>([])
 
-  // —— 气泡：自动消失，最多保留两条，避免刷屏 ——
-  const say = useCallback((text: string, tone: BubbleMessage['tone'] = 'info') => {
+  const pushToast = useCallback((tone: Toast['tone'], message: string) => {
     const id = newId()
-    setBubbles((current) => [...current.slice(-1), { id, text, tone, time: now() }])
-    window.setTimeout(() => {
-      setBubbles((current) => current.filter((b) => b.id !== id))
-    }, BUBBLE_MS)
+    setToasts((cur) => [...cur.slice(-2), { id, tone, message }])
+    window.setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), 3200)
   }, [])
 
-  // 组件卸载时释放所有 blob URL，避免内存泄漏
-  useEffect(() => {
-    const urls = objectUrls.current
-    return () => {
-      urls.forEach((url) => URL.revokeObjectURL(url))
-    }
+  useEffect(() => () => { objectUrls.current.forEach((u) => URL.revokeObjectURL(u)) }, [])
+
+  const toggleMute = useCallback(() => {
+    setMuted((cur) => {
+      const next = !cur
+      try { window.localStorage.setItem(MUTED_KEY, next ? '1' : '0') } catch { /* 忽略 */ }
+      return next
+    })
   }, [])
 
-  const trackUrl = useCallback((url: string | null) => {
-    if (url) objectUrls.current.push(url)
-    return url
-  }, [])
-
-  const applyState = useCallback((next: LingState) => {
-    if (!hasUsableState(next)) return
-    setState((current) => mergeState(current, next))
-    setLastKnown((current) => (current ? mergeState(current, next) : next))
-  }, [])
-
-  // —— 连接与状态轮询 ——
-  const refresh = useCallback(async () => {
+  // ── 连接与状态 ──
+  const refreshState = useCallback(async () => {
     setRefreshing(true)
     try {
-      await checkHealth(token)
-      const next = await fetchState(token)
-      applyState(next)
+      await checkHealth(cfg)
+      const next = await fetchState(cfg)
+      if (hasUsableState(next)) setState((cur) => ({ ...cur, ...next }))
       setConnection('online')
       setConnError(null)
-    } catch (error) {
+    } catch (err) {
       setConnection('offline')
-      setConnError(toFriendlyError(error))
+      setConnError(toAppError(err))
     } finally {
       setRefreshing(false)
     }
-  }, [applyState, token])
+  }, [cfg])
 
   useEffect(() => {
-    setConnection('connecting')
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), REFRESH_MS)
+    void refreshState()
+    const timer = window.setInterval(() => { void refreshState() }, REFRESH_MS)
     return () => window.clearInterval(timer)
-  }, [refresh])
+  }, [refreshState])
 
-  // —— 表情列表：进入心情页时才拉，减少无谓请求 ——
-  useEffect(() => {
-    if (view !== 'mood' || emotions.length > 0) return
-    let alive = true
-    setEmotionsLoading(true)
-    void fetchEmotions(token, state.mood, state.energy)
-      .then((data) => {
-        if (alive) {
-          setEmotions(data.items)
-          setRecommended(data.recommended)
-        }
-      })
-      .catch((error) => {
-        if (alive) setMoodError(toFriendlyError(error))
-      })
-      .finally(() => {
-        if (alive) setEmotionsLoading(false)
-      })
-    return () => {
-      alive = false
+  // ── 历史 ──
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    setHistoryError(null)
+    try {
+      const data = await fetchHistory(cfg, HISTORY_LIMIT)
+      setMessages(data.items)
+      setHasMore(data.has_more)
+    } catch (err) {
+      setHistoryError(toAppError(err))
+    } finally {
+      setHistoryLoading(false)
     }
-  }, [view, token, emotions.length, state.mood, state.energy])
+  }, [cfg])
 
-  // —— 画廊：进入时才拉，并逐张换取带鉴权的图片 ——
+  useEffect(() => { void loadHistory() }, [loadHistory])
+
+  const loadMore = useCallback(async () => {
+    const oldest = messages[0]
+    if (!oldest) return
+    try {
+      const data = await fetchHistory(cfg, HISTORY_LIMIT, oldest.ts)
+      setMessages((cur) => [...data.items, ...cur])
+      setHasMore(data.has_more)
+    } catch (err) {
+      pushToast('error', toAppError(err).message)
+    }
+  }, [cfg, messages, pushToast])
+
+  const historyRounds = useMemo(() => groupRounds(messages), [messages])
+
+  // ── 发送 ──
+  const handleSend = useCallback(async () => {
+    const text = draft.trim()
+    if (!text || sending) return
+    const roundId = newId()
+    const ts = new Date().toISOString()
+    const userMsg: HistoryMessage = { id: roundId + '-u', ts, role: 'user', content: text, client_id: clientId }
+
+    setDraft('')
+    setSending(true)
+    setLiveRounds((cur) => [...cur, { id: roundId, index: -1, user: userMsg, ts }])
+
+    try {
+      const response = await sendChat(cfg, text, clientId)
+      const assistantMsg: HistoryMessage = {
+        id: roundId + '-a', ts: new Date().toISOString(), role: 'assistant',
+        content: typeof response.reply === 'string' ? response.reply : '（没有收到回复）',
+        client_id: clientId,
+      }
+      setLiveRounds((cur) => cur.map((r) => (r.id === roundId ? { ...r, assistant: assistantMsg } : r)))
+      setConnection('online')
+      setConnError(null)
+      if (response.state) {
+        const patch = normalizeState(response.state)
+        if (hasUsableState(patch)) setState((cur) => ({ ...cur, ...patch }))
+      }
+    } catch (err) {
+      const friendly = toAppError(err)
+      setConnError(friendly)
+      setConnection('offline')
+      setLiveRounds((cur) =>
+        cur.map((r) =>
+          r.id === roundId
+            ? {
+                ...r,
+                assistant: {
+                  id: roundId + '-a', ts: new Date().toISOString(), role: 'assistant' as const,
+                  content: friendly.message + (friendly.hint ? '（' + friendly.hint + '）' : ''),
+                  client_id: clientId,
+                },
+              }
+            : r,
+        ),
+      )
+    } finally {
+      setSending(false)
+    }
+  }, [cfg, clientId, draft, sending])
+
+  // ── 画廊 ──
   const loadGallery = useCallback(async () => {
     setGalleryLoading(true)
     setGalleryError(null)
     try {
-      const items = await listArtwork(token)
+      const items = await listArtwork(cfg)
       setArtworks(items)
       const entries = await Promise.all(
-        items.map(async (item) => [item.id, trackUrl(await fetchArtworkBlobUrl(token, item.id))] as const),
+        items.map(async (item) => {
+          const blob = await fetchArtworkBlob(cfg, item.id)
+          if (!blob) return null
+          const url = URL.createObjectURL(blob)
+          objectUrls.current.push(url)
+          return [item.id, url] as const
+        }),
       )
-      setArtUrls((current) => {
-        const next = { ...current }
-        for (const [id, url] of entries) if (url) next[id] = url
+      setArtUrls((cur) => {
+        const next = { ...cur }
+        for (const e of entries) if (e) next[e[0]] = e[1]
         return next
       })
-    } catch (error) {
-      setGalleryError(toFriendlyError(error))
+    } catch (err) {
+      setGalleryError(toAppError(err))
     } finally {
       setGalleryLoading(false)
     }
-  }, [token, trackUrl])
+  }, [cfg])
 
   useEffect(() => {
     if (view === 'gallery' && artworks.length === 0 && !galleryLoading) void loadGallery()
   }, [view, artworks.length, galleryLoading, loadGallery])
 
-  // —— 聊天 ——
-  const handleSend = useCallback(async () => {
-    const text = input.trim()
-    if (!text || sending) return
-    setMessages((m) => [...m, { id: newId(), role: 'user', content: text, time: now() }])
-    setInput('')
-    setSending(true)
+  const interact = useCallback(async (kind: InteractionKind) => {
+    if (interacting) return
+    setInteracting(kind)
     try {
-      const response = await sendChat(text, clientId, token)
-      if (!response || typeof response.reply !== 'string') {
-        throw new Error('bad reply')
-      }
-      setMessages((m) => [...m, { id: newId(), role: 'assistant', content: response.reply, time: now() }])
-      if (response.state !== undefined && response.state !== null) {
-        applyState(normalizeState(response.state as Record<string, unknown>))
-      }
-      setConnection((c) => (c === 'offline' ? 'online' : c))
-      setConnError(null)
-    } catch (error) {
-      const friendly = toFriendlyError(error)
-      setConnection('offline')
-      setConnError(friendly)
-      setMessages((m) => [
-        ...m,
-        { id: newId(), role: 'system', content: friendly.message + (friendly.hint ? '：' + friendly.hint : ''), time: now() },
-      ])
+      const next = await postInteraction(cfg, kind, clientId)
+      if (next && hasUsableState(next)) setState((cur) => ({ ...cur, ...next }))
+      else pushToast('info', '这个互动暂时还不可用')
     } finally {
-      setSending(false)
+      setInteracting(null)
     }
-  }, [applyState, clientId, input, sending, token])
+  }, [cfg, clientId, interacting, pushToast])
 
-  // —— 互动 ——
-  const interact = useCallback(
-    async (kind: InteractionKind) => {
-      if (interacting) return
-      setInteracting(kind)
-      try {
-        const next = await postInteraction(token, kind, clientId)
-        if (next) applyState(next)
-        say(kind === 'feed' ? '吃饱啦，谢谢你' : kind === 'stroke' ? '呼噜呼噜…' : '好耶', 'success')
-      } finally {
-        setInteracting(null)
-      }
-    },
-    [applyState, clientId, interacting, say, token],
-  )
-
-  // —— 表情 ——
-  const renderOne = useCallback(
-    async (body: { trigger?: string; emotion?: string }, key: string) => {
-      if (rendering) return
-      setRendering(key)
-      setMoodError(null)
-      setRenderResult(null)
-      setRenderUrl(null)
-      try {
-        const result = await renderEmotion(token, { ...body, mood: state.mood, energy: state.energy })
-        setRenderResult(result)
-        const id = result.artwork_id ?? result.id
-        if (id) setRenderUrl(trackUrl(await fetchArtworkBlobUrl(token, id)))
-      } catch (error) {
-        setMoodError(toFriendlyError(error))
-      } finally {
-        setRendering(null)
-      }
-    },
-    [rendering, state.energy, state.mood, token, trackUrl],
-  )
-
-  // —— 生图 ——
-  const handleGenerate = useCallback(
-    async (prompt: string, reason: string) => {
-      setGenerating(true)
-      setGalleryError(null)
-      try {
-        const result = await generateImage(token, { prompt, reason, mood: state.mood, client_id: clientId })
-        say('画好啦，去画廊看看', 'success')
-        const item = result.artwork
-        if (item) {
-          setArtworks((current) => [item, ...current.filter((a) => a.id !== item.id)])
-          const url = trackUrl(await fetchArtworkBlobUrl(token, item.id))
-          if (url) setArtUrls((current) => ({ ...current, [item.id]: url }))
-        }
-      } catch (error) {
-        setGalleryError(toFriendlyError(error))
-      } finally {
-        setGenerating(false)
-      }
-    },
-    [clientId, say, state.mood, token, trackUrl],
-  )
-
-  // —— 静音 ——
-  const toggleMute = useCallback(async () => {
-    const next = !muted
-    setMuted(next)
-    writeStore(MUTED_KEY, next ? '1' : '0')
-    if (desktop) await setClickThrough(next)
-    say(next ? '好，我安静陪你' : '我回来啦', next ? 'info' : 'success')
-  }, [desktop, muted, say])
-
-  // —— 托盘 ——
-  useTrayMenu({
-    show: () => {
-      if (desktop) void getCurrentWindow().show().catch(() => setNotice('显示窗口失败，请检查权限'))
-    },
-    hide: () => {
-      if (desktop) void getCurrentWindow().hide().catch(() => setNotice('隐藏窗口失败，请检查权限'))
-    },
-    toggleMute: () => void toggleMute(),
-    refresh: () => void refresh(),
-    resetWindow: () => {
-      if (!desktop) return
-      void (async () => {
-        try {
-          const win = getCurrentWindow()
-          await win.unminimize()
-          await win.show()
-          await win.center()
-        } catch {
-          setNotice('重置窗口位置失败，请检查权限')
-        }
-      })()
-    },
-    openSettings: () => setSettingsOpen(true),
-  })
-
+  // ── 部署 / 名字 ──
+  // 连上后端后拉一次服务端保存的部署配置；端点不可用（404/网络错误）时保持本地缓存并标记降级。
   useEffect(() => {
-    if (!desktop) return
-    let alive = true
-    void getCurrentWindow()
-      .isAlwaysOnTop()
-      .then((value) => {
-        if (alive) setPinned(value)
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [desktop])
+    if (connection !== 'online') return
+    let cancelled = false
+    void (async () => {
+      try {
+        const doc = await fetchDeployment(cfg)
+        if (cancelled) return
+        setDeploymentSync('synced')
+        // 服务端有配置才采用；否则保留本地（可能用户刚在离线时选过）
+        if (doc.mode) {
+          saveDeployment(doc)
+          setDeployment(doc)
+        }
+      } catch {
+        if (!cancelled) setDeploymentSync('cached')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [cfg, connection])
 
-  const togglePinned = async () => {
-    const next = !pinned
+  /** 保存部署配置：先写后端，失败则退回本地缓存并明确标记降级。 */
+  const applyDeployment = async (dep: Deployment) => {
+    saveDeployment(dep)
+    setDeployment(dep)
+    setCfg(resolveConnection())
+    markOnboarded()
+    setOnboarded(true)
     try {
-      await getCurrentWindow().setAlwaysOnTop(next)
-      setPinned(next)
+      await putDeployment({ baseUrl: resolveConnection().baseUrl, token: resolveConnection().token }, dep)
+      setDeploymentSync('synced')
     } catch {
-      setNotice('置顶切换失败，请检查窗口权限')
+      setDeploymentSync('cached')
+      pushToast('info', '本地已保存，但服务器暂时没记住（端点不可用）')
     }
   }
 
-  // —— 渲染 ——
-  const display = describeState({
-    state: connection === 'offline' && lastKnown ? lastKnown : state,
-    connection,
-    hasState,
-  })
-  const tone = statusTone(connection, state.quiet === true || muted)
-  const offline = connection === 'offline'
+  const applyName = (name: string) => {
+    saveWhaleName(name)
+    setWhaleName(name)
+  }
+
+  const applyConnection = (baseUrl: string, token: string) => {
+    saveConnection(baseUrl, token)
+    setCfg({ baseUrl: baseUrl.replace(/\/$/, ''), token })
+  }
+
+  const online = connection === 'online'
+  const brandTone = online ? 'online' : connection === 'offline' ? 'offline' : 'connecting'
 
   return (
     <div className="app">
+      <div className="aurora" aria-hidden="true"><span /><span /><span /></div>
+      <div className="noise" aria-hidden="true" />
+
       <div className="window">
+        {/* 顶栏：左名字，右圆形头像（点击切静音） */}
         <header className="titlebar">
-          <div className="titlebar-brand" data-tauri-drag-region>
-            <span className={'live-dot live-dot--' + tone} aria-hidden="true" />
-            <span className="titlebar-title">灵鲸鲸</span>
-            <span className="titlebar-sub">
-              {muted ? '静音中' : display.headline}
-              {display.detail ? ' · ' + display.detail : ''}
+          <div className="brand" data-tauri-drag-region>
+            <span className={'brand-dot brand-dot--' + brandTone} aria-hidden="true" />
+            <span className="brand-name">{whaleName}</span>
+            <span className="brand-status">
+              {online ? (muted ? '静音中' : '在线') : connection === 'offline' ? '离线' : '连接中'}
             </span>
           </div>
-          <button
-            type="button"
-            className={muted ? 'icon-btn is-active' : 'icon-btn'}
-            onClick={() => void toggleMute()}
-            aria-pressed={muted}
-            title={muted ? '恢复声音' : '静音'}
-            aria-label={muted ? '恢复声音' : '静音'}
-          >
-            {muted ? '🔇' : '🔊'}
-          </button>
-          {desktop && (
-            <button
-              type="button"
-              className={pinned ? 'icon-btn is-active' : 'icon-btn'}
-              onClick={() => void togglePinned()}
-              aria-pressed={pinned}
-              title={pinned ? '取消置顶' : '始终置顶'}
-              aria-label={pinned ? '取消置顶' : '始终置顶'}
-            >
-              📌
-            </button>
-          )}
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="设置"
-            title="设置"
-          >
-            ⚙
-          </button>
-          {desktop && (
-            <>
-              <button type="button" className="icon-btn" onClick={() => getCurrentWindow().minimize()} aria-label="最小化">—</button>
-              <button type="button" className="icon-btn icon-btn--danger" onClick={() => getCurrentWindow().close()} aria-label="关闭">×</button>
-            </>
-          )}
+          <WhaleAvatar
+            size={34}
+            online={online}
+            muted={muted}
+            label={whaleName}
+            onClick={toggleMute}
+          />
         </header>
 
-        {notice && (
-          <div className="alert alert--warn" role="status" style={{ margin: '8px 16px 0' }}>
-            <div><span>{notice}</span></div>
-          </div>
-        )}
-
-        <div className="body">
-          <nav className="rail" aria-label="主导航">
-            <div className="rail-whale">
-              <Whale
-                energy={state.energy}
-                satiety={state.satiety}
-                tiredness={state.tiredness}
-                mood={state.mood}
-                presence={state.presence}
-                quiet={state.quiet === true || muted}
-                offline={offline}
-                size={64}
-              />
-            </div>
-            {NAV.map((item) => (
+        {/* 导航：一行五个等宽胶囊 */}
+        <nav className="tabs" role="tablist" aria-label="主导航">
+          {NAV.map((item) => {
+            const Icon = item.icon
+            return (
               <button
                 key={item.id}
                 type="button"
-                className={view === item.id ? 'rail-btn is-current' : 'rail-btn'}
+                role="tab"
+                aria-selected={view === item.id}
+                className={'tab' + (view === item.id ? ' is-current' : '')}
                 onClick={() => setView(item.id)}
-                aria-current={view === item.id ? 'page' : undefined}
               >
-                <span className="rail-icon" aria-hidden="true">{item.icon}</span>
+                <Icon size={16} />
                 <span>{item.label}</span>
               </button>
-            ))}
-            <div className="rail-spacer" />
-          </nav>
+            )
+          })}
+        </nav>
+
+        <div className="body">
+          {/* 左侧 40px 细栏：状态徽章 */}
+          <StatusRail
+            state={state}
+            online={online}
+            muted={muted}
+            onGoInteract={() => setView('interact')}
+          />
 
           <main className="main">
-            {offline && (
-              <div style={{ padding: '14px 26px 0' }}>
+            {connection === 'offline' && connError && (
+              <div style={{ padding: '12px 20px 0' }}>
                 <div className="alert alert--error" role="alert">
                   <div>
-                    <strong>{connError?.message ?? '联系不上大脑服务'}</strong>
-                    <span>{connError?.hint ?? '确认服务开着后，我可以自动重连'}</span>
+                    <strong>{connError.message}</strong>
+                    <span>{connError.hint}</span>
                   </div>
                 </div>
               </div>
             )}
 
             {view === 'chat' && (
-              <ChatPanel
-                messages={messages}
-                input={input}
-                onInputChange={setInput}
-                onSend={() => void handleSend()}
+              <ChatPage
+                rounds={historyRounds}
+                historyLoading={historyLoading}
+                historyError={historyError}
+                hasMore={hasMore}
+                onLoadMore={() => void loadMore()}
                 sending={sending}
-                disabled={offline}
-                offline={offline}
+                draft={draft}
+                onDraft={setDraft}
+                onSend={() => void handleSend()}
+                connection={connection}
+                liveRounds={liveRounds}
               />
             )}
-            {view === 'mood' && (
-              <MoodPanel
-                emotions={emotions}
-                recommended={recommended}
-                loading={emotionsLoading}
-                rendering={rendering}
-                result={renderResult}
-                resultUrl={renderUrl}
-                error={moodError}
-                onRenderSelf={() => void renderOne({ trigger: '画个你自己' }, 'self')}
-                onRenderEmotion={(id) => void renderOne({ emotion: id }, id)}
-                onArtwork={() => {
-                  setView('gallery')
-                  void loadGallery()
-                }}
+            {view === 'interact' && (
+              <StatePage
+                state={state}
+                connection={connection}
+                error={connError}
+                onRefresh={() => void refreshState()}
+                refreshing={refreshing}
+                interacting={interacting}
+                onInteract={(kind) => void interact(kind)}
               />
             )}
             {view === 'gallery' && (
-              <GalleryPanel
-                artworks={artworks}
+              <GalleryPage
+                items={artworks}
                 urls={artUrls}
                 loading={galleryLoading}
-                generating={generating}
                 error={galleryError}
-                onGenerate={(prompt, reason) => void handleGenerate(prompt, reason)}
                 onRefresh={() => void loadGallery()}
               />
             )}
-            {view === 'state' && (
-              <StatePanel
-                state={connection === 'offline' && lastKnown ? lastKnown : state}
-                connection={connection}
-                hasState={hasState}
-                interacting={interacting}
-                onInteract={(kind) => void interact(kind)}
-                onRefresh={() => void refresh()}
-                refreshing={refreshing}
+            {view === 'tools' && (
+              <ToolsPage
+                onGoGallery={() => setView('gallery')}
+                onGoModels={() => setView('settings')}
+                onGoInteract={() => setView('interact')}
+                error={connError}
+              />
+            )}
+            {view === 'settings' && (
+              <SettingsPage
+                cfg={cfg}
+                whaleName={whaleName}
+                deployment={deployment}
+                deploymentSync={deploymentSync}
+                onSaveName={applyName}
+                onSaveDeployment={(dep) => void applyDeployment(dep)}
+                onSaveConnection={applyConnection}
+                onToast={pushToast}
               />
             )}
           </main>
         </div>
 
-        <BubbleLayer bubbles={bubbles} />
-
-        {settingsOpen && (
-          <SettingsDialog
-            token={token}
-            onSave={(next) => {
-              writeStore(TOKEN_KEY, next)
-              setToken(next)
-              setSettingsOpen(false)
-              say('连接设置已更新', 'success')
-            }}
-            onClose={() => setSettingsOpen(false)}
-          />
-        )}
+        <div className="peek-toast" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className={'toast toast--' + t.tone}>{t.message}</div>
+          ))}
+        </div>
       </div>
+
+      {!splashDone && (
+        <Splash ready={connection !== 'connecting'} onDone={() => setSplashDone(true)} />
+      )}
+
+      {splashDone && !onboarded && (
+        <Onboarding onDone={(dep) => void applyDeployment(dep)} />
+      )}
     </div>
   )
 }

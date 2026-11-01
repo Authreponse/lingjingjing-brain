@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets as _secrets
 from typing import Any
 
@@ -32,11 +33,15 @@ def build_system_prompt(
 
 
 class BrainService:
-    def __init__(self, db: Database, model: ChatModel, state_source=None):
+    def __init__(self, db: Database, model: ChatModel, state_source=None, router=None):
         self.db = db
         self.model = model
         # 可注入的状态机（返回对外投影）；未注入时退回 db.get_state()。
         self.state_source = state_source
+        # V4：提供商路由。为 None 时退回启动时注入的 model（老行为不变）。
+        self.router = router
+        # 最近一次 chat 用了哪个提供商 / 有没有故障转移，供响应与排障使用。
+        self.last_route: dict[str, Any] = {}
 
     async def extract(
         self,
@@ -112,6 +117,23 @@ class BrainService:
         )
         return payload
 
+    async def _run_chat(
+        self, history: list[dict[str, str]], system: str
+    ) -> tuple[str, str, list[dict], str]:
+        """选提供商并执行 chat，返回 (回复, 使用的提供商 id, 故障转移记录, 模型名)。
+
+        * 没有 router：退回启动时的 model（老行为，model id 记成 "default"）。
+        * 有 router：single 模式失败直接抛出（路由层映射 503）；
+          concurrent 模式按延迟/能力故障转移，记录每一次失败（不隐藏降级）。
+        """
+        if self.router is None:
+            reply = await self.model.chat(history, system)
+            return reply, "default", [], self.model.name
+        reply, provider, failovers = await self.router.chat_with_failover(history, system)
+        provider_id = getattr(provider, "id", "default")
+        model_name = getattr(provider, "model", None) or getattr(provider, "name", "unknown")
+        return reply, provider_id, failovers, model_name
+
     async def chat(self, message: str, client_id: str) -> ChatResponse:
         message = message.strip()
         if not message:
@@ -148,11 +170,25 @@ class BrainService:
         known = self.db.important_memories(limit=8)
         context = {item["id"]: item for item in [*known, *related]}
         system = build_system_prompt(state, list(context.values()))
-        reply = await self.model.chat(self.db.recent_messages(limit=20), system)
+        history = self.db.recent_messages(limit=20)
+        reply, used_provider_id, failovers, model_name = await self._run_chat(
+            history, system
+        )
+        self.last_route = {
+            "used_provider_id": used_provider_id,
+            "failovers": failovers,
+            "model": model_name,
+        }
         assistant_event = self.db.append_event(
             "灵鲸鲸",
             "assistant.message",
-            {"content": reply, "client_id": client_id, "model": self.model.name},
+            {
+                "content": reply,
+                "client_id": client_id,
+                "model": model_name,
+                "provider_id": used_provider_id,
+                "failovers": failovers,
+            },
         )
         # 只记录"发生了什么"，不在这里改 energy/mood/presence。
         # 这三个值是状态机（state_machine）的投影：它按真实流逝时间做浮点衰减，
@@ -174,7 +210,77 @@ class BrainService:
             user_event_id=user_event["id"],
             assistant_event_id=assistant_event["id"],
             memories=saved_memories,
+            used_provider_id=self.last_route.get("used_provider_id"),
+            failovers=list(self.last_route.get("failovers") or []),
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/chat/history —— 聊天历史（V4 契约第 1 节）
+# ---------------------------------------------------------------------------
+
+#: 允许出现的角色（system 事件不返回）
+CHAT_ROLES = ("user", "assistant")
+#: actor → role 的映射。主人在 event 里记成"主人"，她记成"灵鲸鲸"。
+ACTOR_TO_ROLE = {"主人": "user", "灵鲸鲸": "assistant"}
+#: 契约默认值
+HISTORY_DEFAULT_LIMIT = 200
+HISTORY_MAX_LIMIT = 500
+
+
+def list_chat_history(
+    db: Database,
+    *,
+    limit: int = HISTORY_DEFAULT_LIMIT,
+    before: str | None = None,
+) -> dict[str, Any]:
+    """从 event 表读聊天消息，**按时间正序**返回（契约要求正序，不是倒序）。
+
+    * 只返回 user.message / assistant.message，system 事件一律不出现。
+    * role 由 actor 映射：主人 → user，灵鲸鲸 → assistant。
+    * ``before`` 传某条消息的 ts，取它**之前**的消息（向历史翻页）。
+    * 多取一条用来判断 ``has_more``，再把多的那条丢掉。
+    """
+    limit = max(1, min(int(limit), HISTORY_MAX_LIMIT))
+    sql = """
+        SELECT id, ts, actor, payload FROM event
+        WHERE kind IN ('user.message', 'assistant.message')
+    """
+    params: list[Any] = []
+    if before:
+        sql += " AND ts < ?"
+        params.append(before)
+    # 先按倒序取最近的 limit+1 条，再翻转成正序
+    sql += " ORDER BY ts DESC, rowid DESC LIMIT ?"
+    params.append(limit + 1)
+
+    with db._lock:
+        rows = db.conn.execute(sql, params).fetchall()
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    items: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        payload = json.loads(row["payload"])
+        actor = row["actor"]
+        role = ACTOR_TO_ROLE.get(actor)
+        if role is None or role not in CHAT_ROLES:
+            continue
+        item: dict[str, Any] = {
+            "id": row["id"],
+            "ts": row["ts"],
+            "role": role,
+            "content": payload.get("content", ""),
+            "client_id": payload.get("client_id"),
+        }
+        # 契约示例里 assistant 带 model；用户消息没有就不加空洞字段
+        if role == "assistant" and payload.get("model"):
+            item["model"] = payload["model"]
+        items.append(item)
+
+    return {"items": items, "has_more": has_more}
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+#: 2 = V4 提供商注册表与路由配置（provider / routing 两张新表）
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -124,6 +125,34 @@ CREATE TABLE IF NOT EXISTS handover (
     evidence_ids TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- V4：模型提供商注册表。api_key 只写不读，接口层永不返回它。
+CREATE TABLE IF NOT EXISTS provider (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    capabilities TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    last_checked_at TEXT,
+    latency_ms INTEGER,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_name ON provider(name);
+-- V4：路由配置。单行表（id 固定为 'default'），整体读写。
+CREATE TABLE IF NOT EXISTS routing (
+    id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    active_provider_id TEXT,
+    enabled_ids TEXT NOT NULL,
+    assignments TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -146,11 +175,15 @@ class Database:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.execute("PRAGMA busy_timeout=5000")
+            # 迁移策略：SCHEMA 全部是 CREATE ... IF NOT EXISTS，天然幂等。
+            # 每次打开都跑一遍，旧库（version=1）会自动补出 V4 的 provider/routing 表，
+            # 新库则一次建好 —— 两条路径走同一份 DDL，不存在"只升级部分环境"的分叉。
             self.conn.executescript(SCHEMA)
-            self.conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, utc_now()),
-            )
+            for version in range(1, SCHEMA_VERSION + 1):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (version, utc_now()),
+                )
             self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._ensure_initial_state()
 

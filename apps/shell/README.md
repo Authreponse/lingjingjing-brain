@@ -1,254 +1,204 @@
 # 灵鲸鲸桌面壳（apps/shell）
 
-**Tauri 2 + React 19 + TypeScript + Vite** 的中文桌面桌宠。
+**Tauri 2 + React 19 + TypeScript + Vite** 的桌面客户端。task-20 做了**推倒重写**：
+`src/` 下所有旧组件、样式与页面逻辑已删除，从零重建。
 
-task-14 做了整体 UI 重做（简约 / 实用 / 人性化）；task-18 在此基础上升级动画与视觉质感，
-目标是接近 Linear / Vercel 那种**克制但精致**的观感。本文件同时记录**设计取舍**与
-**已验证 / 未验证**清单，请按字面理解，不要夸大。
-
----
-
-## 零、task-18 动画设计（本轮重点）
-
-### 设计语言
-
-海蓝 `#2E7FA8` + 乳白 `#FBFAF6`。借鉴 Linear 的克制感，具体手法：
-
-| 手法 | 做法 | 为什么 |
-| --- | --- | --- |
-| 极细描边 | 分割线一律 1px、`#E8EDF0` | 用线而不是色块切分区域，降低视觉噪音 |
-| 多层淡阴影 | `0 1px 2px` + `0 14px 40px` 组合 | 单层阴影会显脏；多层淡阴影更像「贴纸」浮起 |
-| 大留白 | 面板内边距 22→32px 随宽度递增 | 小窗也不挤，宽窗不空旷 |
-| 少量强调 | 只有主按钮和当前导航项用主色 | 主色用得多就不「高级」了 |
-| 数字等宽 | `font-variant-numeric: tabular-nums` | 环形数字变化时不左右跳动 |
-
-### 鲸鱼的生命感
-
-全部用 **CSS 动画 + 一个极小的 React 定时器**，没有引入任何 3D 库。
-
-| 行为 | 实现 | 细节 |
-| --- | --- | --- |
-| 呼吸 | `.whale-body-wrap` 的 `breathe` 关键帧 | 3.4s 往复，位移 −3.5px + 1.2% 纵向缩放 |
-| 游动 | `.whale-tail` 绕身体连接点 `swing` | 默认 2.4s；开心 1.7s、累 4.6s、睡 6.5s |
-| 眨眼 | JS 随机 3–7s 触发 `.is-blinking`，动画本身是 CSS `scaleY(0.12)` | 睡着/离线不眨；reduced-motion 下定时器根本不启动 |
-| 情绪反应 | 嘴角路径、腮红、水柱、z 字、星光、饥饿符号随情绪切换 | 情绪由 energy/satiety/fatigue/mood/presence 推导 |
-
-**为什么眨眼要用 JS 定时器**：纯 CSS 只能做出固定节奏的循环，看起来像机械眨眼。
-这里 JS 只负责「什么时候眨」，压扁动画仍然交给 CSS 过渡，成本极低。
-
-### 其它动画
-
-| 需求 | 实现 | 参数 |
-| --- | --- | --- |
-| 消息进出场 | `msg-in`（淡入 + 上移 10px + 轻微缩放） | 240ms `cubic-bezier(0.16,1,0.3,1)` |
-| 面板切换 | `.panel` 每次挂载播放 `panel-in` | 240ms |
-| 能量条弹性 | 环形 `stroke-dashoffset` 过渡 | **900ms `cubic-bezier(0.34,1.56,0.64,1)`（带回弹）** |
-| 波浪水位 | `translateY` + 内层 `translateX` 循环 | 1100ms 上浮；7s 横向流动 |
-| 打字机 | JS 逐字追加 + CSS 闪烁光标 | 18ms/步，随机 1–2 字节 |
-| 状态点 | `pulse` 呼吸环 | 2.6s |
-| 悬停微交互 | 卡片 `translateY(-3px)` + 阴影加深 | 240ms，回弹曲线 |
-
-### 为什么不用重型库
-
-要求是「CSS 动画即可」。这里全部动画只操作 `transform` / `opacity` / `filter`，
-不触发布局重排；波浪与环形用 SVG 而非 canvas，省掉重绘循环与额外依赖。
-
-### prefers-reduced-motion
-
-**双层降级**，任何一处都不能只做一半：
-
-1. **CSS**：统一 `animation-duration: 0.01ms`、`transition-duration: 0.01ms`，
-   并强制 `animation-iteration-count: 1`。
-2. **JS**：打字机直接显示全文；眨眼的定时器**根本不启动**；滚动用 `auto`。
-
-> 实测（CDP `Emulation.setEmulatedMedia`）确认开启后会降到 `1e-05s`。
-
-### 响应式 400–1400px
-
-| 断点 | 变化 |
-| --- | --- |
-| ≤ 430px | 导航只留图标；隐藏副标题；环两列 |
-| ≤ 560px | 内边距收紧；消息宽 88%；互动按钮三列；表情两列 |
-| 561–899px | 默认布局 |
-| ≥ 900px | 内容留白加大；消息宽 68%；环四列大间距 |
-| ≥ 1200px | 进一步加宽留白（32/56px） |
-
-画廊瀑布流用 `ResizeObserver` 按容器宽度切 1/2/3/4 列，单列限宽 260px，
-避免宽窗下每张图被拉成一屏。
+视觉方向：暗色玻璃拟态 + 渐变光晕 + 微噪点；布局以 [docs/ui-v4-layout.md](../../docs/ui-v4-layout.md)（主人手绘线框）
+为最终依据；接口契约以 [docs/api-v4.md](../../docs/api-v4.md) 为准。
 
 ---
 
-## 一、设计取舍
-
-### 1. 布局：左侧窄导航，而不是标签页/汉堡菜单
-
-窗口默认 420×680，属于「小窗」。取舍如下：
-
-| 方案 | 问题 |
-| --- | --- |
-| 顶部分段标签 | 挤压标题栏，4 个标签在小窗里很挤 |
-| 汉堡/抽屉菜单 | 核心功能被藏起来，违背「一键可达」 |
-| **左侧 64px 窄导航（采用）** | 固定占位、图标+文字、一眼看清全部一级功能，点击即达 |
-
-窄导航顶部放小鲸鱼作为视觉锚点，同时复用为状态缩略。
-
-### 2. 信息层级：一个主色、一条分割线、三档阴影
-
-- **配色**：海蓝 `#2E7FA8` 主色 + 乳白 `#FBFAF6` 背景，呼应小蓝鲸设定。
-  另有三个语义色只在真正需要时出现：珊瑚（错误）、琥珀（提醒）、鼠尾草绿（成功）。
-- **层级**：只靠「背景明度 + 1px 分割线」区分区域，**不堆叠卡片边框**。
-- **阴影**：三档，越靠上层越大；不使用彩色光晕。
-- **圆角**：8/12/16/24 四档，从小到大对应 徽章→控件→卡片→容器。
-- **间距**：4px 基准栅格（4/8/12/16/20/24/32）。
-
-### 3. 动效：只用位移与透明度，120–220ms
-
-气泡 `rise`、弹层 `pop`、鲸鱼 `breathe`，全部是低幅度位移或透明度变化，没有缩放弹跳、没有旋转、没有渐变扫光。
-**完整遵守 `prefers-reduced-motion`**：用户开启「减少动态效果」后，所有动画降到 0.01ms。
-
-### 4. 人性化：状态说人话
-
-状态不是罗列字段，而是翻译成一句自然的话：
-
-- 标题：`在呢` / `睡着了` / `静音中` / `暂时联系不上`
-- 描述：`开心 · 想歇会儿 · 有点饿`
-
-细节取舍：
-
-- **缺席 ≠ 0**。任何字段没拿到就显示「—」加虚线底纹，绝不画成 0%（那会被误读成「耗尽」）。
-- **疲惫是反向指标**。它越高越累，所以用独立的紫灰色系，而不是和能量共用「越多越好」的配色——否则越累条越满越蓝，语义就反了。
-- **离线不装正常**。断连时标题变「暂时联系不上」，数值降饱和，并明说「这是上次记住的样子」。
-- 静音分为两层：**本地静音**（壳的点穿，不挡鼠标）和**后端静默时段**（`in_quiet_hours`），两者都会在标题显示「静音中」。
-
-### 5. 错误提示：绝不暴露状态码
-
-统一走 `toFriendlyError()`，HTTP 状态码 → 人话：
-
-| 情况 | 显示给用户 |
-| --- | --- |
-| 401 / 403 | 连接口令不对 · 打开设置，检查一下令牌 |
-| 404 | 没找到这个内容 · 可能已经不在啦 |
-| 422 | 这次请求我没看懂 · 换个说法再试试 |
-| 429 / 队列暂停 | 有点忙不过来了 · 缓一缓再叫我 |
-| 5xx | 我这边出了点小状况 · 稍等一下再试 |
-| 生图预算用完 | 今天的画已经画完啦 · 明天再来找我画吧 |
-| 网络失败 | 联系不上我 · 确认大脑服务开着了没 |
-| 超时 | 等太久了，先不等了 · 网络或显卡比较慢，稍后再试 |
-
-**不出现 `404`、`image_budget_exhausted`、`fetch failed` 这类字眼。**
-
-### 6. 键盘可用
-
-- **Enter 发送**，Shift+Enter 换行；输入法组词时不会误发送（判断 `isComposing`）。
-- **Esc 关闭设置弹层**。
-- 打开设置时焦点自动落在令牌输入框并全选。
-- 弹层内 **Tab 焦点循环**，不会跑到背后被遮住的界面。
-- 所有可点元素都有可见焦点环（`:focus-visible`，2px 海蓝）。
-- 进度条使用 `role="progressbar"` + `aria-valuetext`，缺失时播报「未知」而不是「0%」。
-
-### 7. 用途分层：为什么画廊表单默认收起
-
-默认视图是「看画」，不是「填表」。生图需要 `prompt` 和 `reason` 两个必填字段（后端强制 reason：为什么想画），把它折叠在「画一张」按钮后，避免一进面板就给用户一堆输入框。
-
----
-
-## 二、界面结构
+## 一、目录结构
 
 ```text
-┌──────────────────────────────────────────┐
-│ ● 在呢            🔊  📌  ⚙  —  ×        │ 状态胶囊 + 窗口操作
-├──────┬───────────────────────────────────┤
-│ 🐳   │                                   │
-│ 聊天 │   [离线时这里是明确的重连引导]     │
-│ 心情 │           主内容面板               │
-│ 画廊 │                                   │
-│ 状态 │         ┌──────────────┐          │
-│      │         │ 输入框   发送 │          │
-│      │         └──────────────┘          │
-└──────┴───────────────────────────────────┘
+apps/shell/src/
+├── App.tsx                  # 应用壳：顶栏 / 五标签 / 左细栏 / 页面路由 / 状态轮询
+├── main.tsx
+├── styles.css               # 设计令牌 + 全部样式与关键帧
+├── types.ts                 # 与 api-v4 契约一一对应的类型
+├── icons/
+│   ├── index.tsx            # 自绘 SVG 图标（导航 / 操作 / 品牌标记）
+│   └── quirk.tsx            # 状态页小图标
+├── lib/
+│   ├── api.ts               # HTTP 层、错误翻译、状态归一化、部署配置端点
+│   ├── chat.ts              # 纯逻辑：轮次分组 / 摘要 / 跟随判定
+│   └── storage.ts           # localStorage 缓存 + 部署模式解析
+├── components/
+│   ├── Splash.tsx           # 初始化动画（粒子汇聚 + 光波扩散，可跳过）
+│   ├── Onboarding.tsx       # 首次启动三步引导
+│   ├── WhaleAvatar.tsx      # 圆形鲸鱼头像（呼吸 + 眨眼）
+│   └── StatusRail.tsx       # 左侧 40px 状态徽章细栏
+└── pages/
+    ├── ChatPage.tsx         # 聊天 + 轮次卡片 + 右侧定位条
+    ├── StatePage.tsx        # 互动（状态环 + 摸头/投喂等动作）
+    ├── GalleryPage.tsx      # 历史画作
+    ├── ToolsPage.tsx        # 小鲸鱼的工具
+    ├── SettingsPage.tsx     # 设置（通用 / 模型 / 关于）
+    └── ModelsSection.tsx    # 模型提供商（并入设置页）
+mock-v4-server.py            # 按 api-v4 契约实现的本地 mock（仅自测用）
 ```
-
-四个面板：**聊天**（对话）、**心情**（表情包一键生成）、**画廊**（看作品 / 生图）、**状态**（数值 + 互动按钮）。
 
 ---
 
-## 三、接的后端接口
+## 二、布局（依据 docs/ui-v4-layout.md）
 
-认证头统一 `X-Ling-Token`（默认 `lingjingjing-local-dev`），地址 `http://127.0.0.1:7100`。
+```text
+┌──────────────────────────────────────────────────────┐
+│ ● 灵鲸鲸  在线                              (鲸鱼头像) │  顶栏：左名字，右圆形头像（点击静音）
+├──────────────────────────────────────────────────────┤
+│  聊天  │  互动  │ 历史画作 │ 小鲸鱼的工具 │  设置    │  五标签等宽胶囊
+├────┬─────────────────────────────────────────────────┤
+│在线│                                                 │
+│87% │            主内容区（各页面）                    │  左侧 40px 状态徽章
+│开心│                                                 │
+│ 饱 │                                                 │
+├────┴─────────────────────────────────────────────────┤
+│  [ 输入框                              ]  发送      │  底部固定，不随内容滚动
+└──────────────────────────────────────────────────────┘
+```
+
+- **顶栏**：左侧鲸鱼名字（设置里可改，存 localStorage）；右侧圆形头像用自绘 SVG，
+  带呼吸（`waBreathe`）与随机眨眼（JS 触发 `.is-blinking`，动画是 CSS 的 scaleY 压扁），点击切换静音。
+- **五标签**：等宽胶囊，当前项渐变描边 + 微光。
+- **左侧细栏**：在线 / 能量 / 心情 / 饥饿 / 静默 五类徽章，hover 向右弹 tooltip（避免被 40px 窄条裁切），点击跳「互动」页。
+- **底部发送栏**：`.composer` 是 `.page` 的 flex 子项且 `flex: 0 0 auto`，**不在滚动容器内**，因此永不滚动。
+
+---
+
+## 三、关键实现与取舍
+
+### 1. 消息被吞的修复
+
+根因是**滚动容器的高度链断裂**：只要任一祖先缺少 `min-height: 0`，`overflow-y: auto` 的容器就会按内容撑开，
+外部再裁切，看起来就像「旧消息被吃掉」。
+
+修复要点：
+
+```css
+.body        { display: flex; flex: 1; min-height: 0; }
+.main        { display: flex; flex: 1; flex-direction: column; overflow: hidden; }
+.page        { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.chat-layout { display: flex; flex: 1; min-height: 0; }
+.chat-scroll { display: flex; flex: 1; min-height: 0; overflow-y: auto; flex-direction: column; }
+```
+
+实测（760×800 视口，8 轮历史）：`scrollHeight=1212`、`clientHeight=452`、`scrollTop=760`（`atBottom: true`），
+说明容器可正确滚动到底部，历史完整可达。
+
+### 2. 跟随与停止跟随
+
+- 用户贴近底部（距底 ≤ 80px）时，新消息到达自动滚到底；
+- 一旦上滚就停止跟随，并显示「回到底部」按钮；
+- 用 `useLayoutEffect` 在 DOM 更新后滚到底，避免闪一下；
+- 首次加载历史后只自动滚一次（`didInitialScroll`），翻页加载更早记录时不会把用户拽走。
+
+### 3. 轮次分组
+
+契约明确规定「后端不预分组」。`lib/chat.ts` 的 `groupRounds()` 是纯函数，处理三种边界：
+连续两条 user（上一轮无回复）、assistant 出现在任何 user 之前、最后一条 user 尚未收到回复。
+
+### 4. 右侧轮次定位条
+
+每轮一个小横条；hover 显示 `#序号 + 摘要`；点击 `scrollTo({behavior:'smooth'})` 定位；
+滚动时按「哪张卡片的 `offsetTop` 最接近当前 `scrollTop`」判定当前轮并高亮。
+
+> 这里刻意**不用 IntersectionObserver**：面板高度只有几百像素，Observer 的阈值在小尺寸下抖动明显。
+
+### 5. 画廊抽搐的修复
+
+三道保险，**完全不做基于图片自然尺寸的高度估算**：
+
+1. 卡片 `.art { aspect-ratio: 1/1 }` —— 高度在图片加载前就已确定；
+2. 图片 `position: absolute; inset: 0` —— 不参与布局；
+3. `img.decode()` 成功后才加 `.is-loaded` 做 `opacity` 淡入。
+
+实测（9 张卡）：高度全部 194px、宽度全部 194px、`aspect-ratio: 1/1`、**heightSpread = 0**、9/9 图片已淡入。
+
+### 6. 状态环形指标：为什么不用 SVG
+
+最初用 SVG `stroke-dasharray` 画环，实测**彩色弧段完全不渲染**。排查后发现两个坑：
+
+- 父级带 `filter: drop-shadow` 时，`svg { transform: rotate(-90deg) }` 会与合成层冲突；
+- 一旦用 `@property` 注册自定义属性（如 `--p`），父元素设置该变量后 `conic-gradient` 整段消失。
+
+最终改用 **CSS conic-gradient**（不注册 `@property`），并单独隔离验证过它能正确渲染。
+代价：数值变化是瞬时切换而非补间——**宁可要正确渲染**。这条已写进 `styles.css` 注释，避免以后有人「优化」回去。
+
+### 7. 动画与无障碍
+
+- 全部动画只操作 `transform / opacity / filter`，不触发布局重排；无任何 3D 库、无 canvas。
+- Splash：12 个粒子 + 3 圈光波，纯 CSS；**点击 / 任意键 / 按钮均可跳过**；`prefers-reduced-motion` 下不播粒子与光波并缩短停留。
+- 眨眼、Splash 跳过等 JS 侧逻辑同样读取 `prefers-reduced-motion`，不止 CSS 降级。
+- `:focus-visible` 统一焦点环；图标全部 `aria-hidden`，按钮带 `aria-label`；环形用 `role="progressbar"` + `aria-valuetext`。
+
+### 8. 图标体系
+
+全部自绘 SVG（24×24 视口、stroke 1.6、round 端点、继承 `currentColor`），**不使用 emoji 当图标**——
+emoji 由系统字体渲染，各平台形状与颜色不一致，也无法做主题化。
+
+---
+
+## 四、接口对接
+
+认证头 `X-Ling-Token`。连接地址解析顺序（契约 §4）：**URL query > localStorage > 默认**。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/v1/health` | 健康检查，每 15 秒与状态轮询 |
-| GET | `/v1/state` | 状态（字段全部可选） |
-| POST | `/v1/chat` | `{message, client_id}` |
-| POST | `/v1/state/interact` | `{kind, client_id, count}`，kind ∈ drag/stroke/feed/poke/wake/play |
-| GET | `/v1/emotions` | 表情列表 + 推荐 |
-| POST | `/v1/emotions/render` | `{trigger?, emotion?, kind}` |
-| POST | `/v1/image/generate` | `{prompt, reason, mood, size}` → 作品在 `result.artwork` |
+| GET | `/v1/health` | 连接检测（20s 轮询） |
+| GET | `/v1/state` | 状态（字段全可选，兼容 `fatigue`/`tiredness`、`in_quiet_hours`/`quiet`） |
+| POST | `/v1/chat` | 对话 |
+| GET | `/v1/chat/history` | 历史（契约 §1） |
+| POST | `/v1/state/interact` | 互动 |
 | GET | `/v1/artwork` | 作品列表 |
-| GET | `/v1/artwork/{id}/file` | 作品图片（**需要鉴权头**） |
+| GET | `/v1/artwork/{id}/file` | 作品图片（需鉴权头，故走 fetch→blob） |
+| GET/PUT | `/v1/deployment` | 部署配置（task-22） |
+| GET/POST/PUT/DELETE | `/v1/providers` | 提供商 CRUD |
+| POST | `/v1/providers/{id}/test` | 连通性测试 |
+| POST | `/v1/providers/routing` | single / concurrent 切换 |
 
-### 状态字段容错
+### 部署配置的持久化（重要）
 
-后端实际字段名以 `state_machine.py` 为准，前端同时兼容早期约定名：
+**后端 `/v1/deployment` 是主存储**；localStorage 只作为端点不可用时的缓存兜底。
+当 `/v1/deployment` 返回 404 或网络失败时，设置页会显示橙色提示「部署配置只保存在本机」，
+**不会假装已经同步**。落盘到 `data/deployment.json` 由后端 / launcher 负责，前端不直接写文件。
 
-| 后端字段 | 前端字段 | 缺席行为 |
-| --- | --- | --- |
-| `energy` | `energy` | 显示「—」+ 虚线底纹 |
-| `satiety` | `satiety` | 同上 |
-| `fatigue`（兼容 `tiredness`） | `tiredness` | 同上 |
-| `affection` | `affection` | 同上 |
-| `in_quiet_hours`（兼容 `quiet`/`muted`） | `quiet` | 视为非静默 |
-| `mood` / `presence` | 同名 | 标题回退到「状态未知」 |
-| `hungry` / `tired` | 同名 | 退回按 satiety/tiredness 阈值判断 |
+### 首次启动引导
 
-数值容错：`83`、`0.83`、`"83"`、`"83%"`、`{"value":83}` 都归一化为 83；越界截断到 0–100；识别不了当作缺失。
+三步单选：是否有服务器 → 终端 / 服务器 → （服务器模式）填 base_url + token。
+结果写 localStorage 并 PUT 到 `/v1/deployment`；之后可在「设置 → 通用 → 部署模式」修改。
 
-### 图片为什么走 blob
+### 模型页（并入设置）
 
-`/v1/artwork/{id}/file` 强制要 `X-Ling-Token`，而 `<img src>` 发不了自定义头。
-所以前端用 `fetch` 带头上取 PNG → `URL.createObjectURL` → 再给 `<img>`，并在组件卸载时 `revokeObjectURL` 防止泄漏。
+列表 / 创建 / 编辑 / 删除 / 测试连通 / single|concurrent 切换 / 最多启用 4 个（超限直接拒绝并提示）/
+分配结果展示（对话 / 记忆提取 / 生图 / 语音）。
+`api_key` 严格按契约：GET 只返回 `has_api_key`；更新时「留空 = 不修改、null = 清除」。
 
 ---
 
-## 四、验证清单（已验证 / 未验证）
+## 五、验证清单
 
-> 本机**没有 Rust 工具链**（`rustc`/`cargo` 均不存在）。凡是涉及原生窗口、托盘、编译的行为一律标为**未验证**，本文档任何地方都不声称它们已通过。
+> 本机**没有 Rust 工具链**。凡涉及原生窗口、托盘、透明效果的行为一律标为**未验证**，
+> 本文档任何地方都不声称它们已通过。
 
 ### ✅ 已验证（本机实际跑过）
-
-**构建与数据层**
 
 | # | 项目 | 证据 |
 | --- | --- | --- |
 | 1 | `tsc --noEmit` | 退出码 0 |
-| 2 | `pnpm run build` | 成功，**无警告**（js 277.1 kB / css 23.8 kB） |
-| 3 | 对真实后端的数据层 | 58 项断言通过：状态解析、表情列表、表情生成（真实出图）、作品图片可取（PNG）、作品列表 |
-| 4 | 用户可见文案 | 31 项断言通过：所有错误分支**不含状态码、不含英文错误码**；离线有引导；字段全缺不假装正常 |
-| 5 | 键盘可用 | 设置按钮可命中 → 弹层打开 → 焦点落在 `api-token` → Esc 后弹层关闭 |
-| 6 | 离线兜底 | 后端不可达时显示「联系不上我 / 确认大脑服务开着了没」，不白屏 |
+| 2 | `pnpm run build` | 成功，**无警告**（js 283.16 kB / css 35.61 kB） |
+| 3 | **滚动容器** | 760×800 视口、8 轮历史：`scrollHeight=1212 / clientHeight=452 / scrollTop=760`，`atBottom=true` |
+| 4 | **回到底部** | 上滚后按钮出现（`toBottomVisible: true`） |
+| 5 | **轮次定位条** | 渲染 8 条小横条，当前轮有 `is-active` |
+| 6 | **画廊不抽搐** | 9 张卡宽高均为 194px、`aspect-ratio: 1/1`、**heightSpread = 0**、9/9 图片解码后淡入 |
+| 7 | 部署配置端点 | mock 上验证 GET / PUT / 422 校验；设置页正确显示「已同步到服务器」 |
+| 8 | 多视口截图 | 560 / 760px 下逐一截图核对：splash、引导、五标签（聊天/互动/历史画作/工具/设置） |
 
-**task-18 动画与视觉（用 Edge 无头 + CDP 运行时读取计算样式，不是看代码猜的）**
+### ⚠️ 用 mock 验证，**不是**真实后端
 
-| # | 项目 | 证据 |
-| --- | --- | --- |
-| 7 | 呼吸动画 | `breathe / 3.4s / infinite` |
-| 8 | 尾巴游动 | `swing / 1.7s / infinite`；连续采样 `transform` 矩阵**确实在变化**（不是静态） |
-| 9 | 波浪流动 | `wave-shift / 7s / infinite` |
-| 10 | 状态点脉冲 | `pulse / 2.6s / infinite` |
-| 11 | 环形弹性 | `stroke-dashoffset 0.9s cubic-bezier(0.34,1.56,0.64,1)` |
-| 12 | 消息进出场 | `msg-in / 0.24s` |
-| 13 | **打字机** | 采样气泡文本长度：**6 → 15 → 25 → 26 字**，光标同步出现后消失 |
-| 14 | **reduced-motion** | CDP 模拟后动画时长降至 `1e-05s`，降级确实生效 |
-| 15 | 多视口截图 | 400 / 760 / 900 / 1400px 四个视口逐一截图核对（聊天、状态、画廊、心情） |
-| 16 | 横向溢出 | 400px 下四个面板 `scrollWidth === clientWidth`，无溢出元素 |
-
-**本轮截图自查中发现并修掉的问题**
-
-1. 画廊瀑布流单列过宽（宽窗下每张图拉成一屏）→ 单列限宽 260px 并居中。
-2. 导航栏 54px 的鲸鱼尾巴与身体糊成一团 → 新增 `simplified` 迷你渲染（放大取景 + 省略水柱/星光等细节），尺寸提到 64px。
-3. 环形轨道色与背景对比不足 → 轨道改 `#E4EBEE`。
-4. 打字机逻辑最初写在渲染函数里（React 反模式）→ 移到 `useEffect`，用已打 id 集合避免重打。
+第 3–7 项跑在 `mock-v4-server.py`（严格按 api-v4 契约实现）上，因为**后端此时还没有** `/v1/providers`、
+`/v1/chat/history`、`/v1/deployment`（task-19 / task-22 并行中）。
+**mock 通过 ≠ 真实后端通过**，这些点必须在后端就绪后复测。
+另：绘画作品是 mock 生成的纯色 PNG，仅用于验证加载链路，不代表真实生图效果。
 
 ### ❌ 未验证
 
@@ -256,88 +206,31 @@ task-14 做了整体 UI 重做（简约 / 实用 / 人性化）；task-18 在此
 | --- | --- | --- |
 | 1 | `cargo check` | **未运行**（cargo 不在 PATH） |
 | 2 | `cargo build` / `tauri build` | **未运行**；`main.rs`、`Cargo.toml`、`capabilities` 均未经编译验证，**可能有编译错误** |
-| 3 | 原生托盘图标与菜单 | **未验证** |
-| 4 | 窗口点穿 `set_ignore_cursor_events` | **未验证** |
-| 5 | 原生拖拽 `data-tauri-drag-region` | **未验证** |
-| 6 | **透明窗口** | **未验证**，见下节 |
-| 7 | 真实显卡上的动画帧率 | **未验证**：截图与 CDP 跑在无头 Edge（`--disable-gpu`），只能证明动画在跑、属性正确，**不能证明在目标机器上的流畅度** |
-| 8 | 真机 GPU 合成下的视觉观感 | **未验证**：无头浏览器不渲染桌面合成器效果 |
-
-> 说明：第 7、8 项是本轮最容易夸大的一处。上面证明的是「动画定义正确且在运行」，
-> **不是**「在用户机器上跑得很流畅」。
-
-### 已知环境限制
-
-后端 CORS 只放行 `http://127.0.0.1:1420`、`http://localhost:1420`、`tauri://localhost` 等来源。
-因此本地预览必须用 **1420 端口**，否则浏览器会拦截跨域请求，界面会显示离线（这是预期行为，不是 bug）。
+| 3 | **透明窗口** | **未验证**：只做到「配置了 `transparent: true`」，不代表合成器实际表现 |
+| 4 | 托盘图标与菜单 | **未验证** |
+| 5 | 窗口点穿 / 原生拖拽 | **未验证** |
+| 6 | 真机 GPU 帧率 | **未验证**：截图与探测跑在无头 Edge（`--disable-gpu`），只能证明动画在跑、布局正确，**不能证明流畅度** |
+| 7 | 与真实后端联调 | **未做**：`/v1/providers`、`/v1/chat/history`、`/v1/deployment` 后端尚未实现 |
+| 8 | 语音 / 表情包接入 | **未做**：工具页如实标为「即将开放」，不是可点不生效的假按钮 |
 
 ---
 
-## 五、透明窗口与始终置顶（未验证）
-
-配置位于 `src-tauri/tauri.conf.json`：`transparent: true`、`decorations: false`、`alwaysOnTop: true`、`shadow: false`；`Cargo.toml` 启用了 `transparent` feature。
-
-**不要仅凭配置文件认定透明效果已验证。** 请在目标机器启动后，把窗口移到彩色壁纸上，确认圆角卡片外没有白色/黑色矩形：
+## 六、本地自测
 
 ```bash
 cd apps/shell
-npm install
-npm run tauri dev
+../../.venv/Scripts/python.exe mock-v4-server.py      # 起 mock（默认 7190）
+pnpm run build
+npx vite preview --host 127.0.0.1 --port 1420
+# 浏览器打开：
+# http://127.0.0.1:1420/?LING_BRAIN_URL=http://127.0.0.1:7190&view=settings
 ```
 
-透明效果依赖操作系统合成器、WebView/GPU 与远程桌面环境；浏览器预览**不能**证明原生透明能力。
-此仓库当前**没有**加入 Electron，也没有声称 Electron 或 Tauri 的透明效果已通过实测。
+`?view=` 支持 `chat / interact / gallery / tools / settings`，便于截图与联调。
 
----
-
-## 六、环境要求与命令
-
-- Node.js 20+；Rust stable + Tauri 2 平台依赖（Windows 需 WebView2、MSVC 生成工具、Windows SDK）。
-
-```bash
-cd apps/shell
-npm install          # 或 pnpm install
-
-npm run dev          # 仅浏览器预览（无原生拖动/置顶/托盘）
-npm run tauri dev    # 开发桌宠窗口
-npm run tauri build  # 打包
-npm run build        # 只验证前端：tsc --noEmit && vite build
-```
-
-装好 Rust 后请按顺序补跑：
+装好 Rust 后请补跑：
 
 ```bash
 cargo check --manifest-path src-tauri/Cargo.toml   # 先确认能编译
-npm run tauri dev                                  # 再实机点托盘、验透明与点穿
-```
-
-### 调试小技巧
-
-- `?view=mood` / `?view=gallery` / `?view=state` / `?view=chat` 可直接打开对应面板，方便截图与联调。
-- 浏览器控制台 `window.__lingTray('toggle-mute')` 可模拟点击托盘菜单项（仅浏览器预览下有这个钩子）。
-
----
-
-## 七、目录
-
-```text
-apps/shell/
-├── src/
-│   ├── App.tsx                   # 应用壳：导航、轮询、四面板接线
-│   ├── api.ts                    # HTTP 层 + 状态归一化 + 错误翻译 + blob 取图
-│   ├── status.ts                 # 纯展示逻辑（可单测）
-│   ├── types.ts                  # 全部字段可选的状态类型
-│   ├── useTrayMenu.ts            # 托盘事件 → 界面动作
-│   ├── styles.css                # 设计系统（配色/间距/圆角/阴影/动效）
-│   └── components/
-│       ├── ChatPanel.tsx
-│       ├── MoodPanel.tsx
-│       ├── GalleryPanel.tsx
-│       ├── StatePanel.tsx
-│       ├── SettingsDialog.tsx
-│       ├── StateMeters.tsx
-│       ├── StateBubble.tsx
-│       └── Whale.tsx             # 原创 SVG 小蓝鲸
-├── src-tauri/                    # Tauri 配置、权限、Rust 入口、图标
-├── index.html / package.json / tsconfig.json / vite.config.ts
+npm run tauri dev                                  # 再实机验透明、托盘、点穿
 ```

@@ -27,6 +27,9 @@ class ChatResponse(BaseModel):
     user_event_id: str
     assistant_event_id: str
     memories: list[MemoryOut]
+    # V4：这次回答实际用了哪个提供商、途中换过谁。只加字段，不影响旧客户端。
+    used_provider_id: str | None = None
+    failovers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
